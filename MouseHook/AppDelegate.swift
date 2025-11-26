@@ -18,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var refreshObserver: NSKeyValueObservation!
     private var eventMonitor: Any!
     private var cancellationToken: AnyCancellable?
+    private let eventQueue = DispatchQueue(label: "com.mousehook.events", qos: .userInteractive)
     
     @objc private dynamic var fastFreqRefresh: Bool = false
     
@@ -35,8 +36,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = NSImage(named: NSImage.Name("mousehook-menubar"))
         }
         mouseController = MouseViewController()
-        fastEventThrottle = self.eventSubject.throttle(for: .seconds(1.0/60.0), scheduler: DispatchQueue.global(), latest: true) // 60Hz
-        slowEventThrottle = self.eventSubject.throttle(for: .seconds(1.0/5.0), scheduler: DispatchQueue.global(), latest: true) // 5Hz
+        fastEventThrottle = self.eventSubject.throttle(for: fastRefreshStride(), scheduler: eventQueue, latest: true)
+        slowEventThrottle = self.eventSubject.throttle(for: .seconds(1.0/5.0), scheduler: eventQueue, latest: true) // 5Hz
         
         setupMouseWindow()
         setupMenu()
@@ -47,12 +48,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             
             let eventThrottle = change.newValue! ? self.fastEventThrottle : self.slowEventThrottle
             
-            self.cancellationToken = eventThrottle?.subscribe(on: DispatchQueue.global()).sink { event in
-                // Don't bother updating mouse position if it is currently hidden
-                DispatchQueue.main.async {
-                    self.update(event)
-                }
-            }
+            self.cancellationToken = eventThrottle?
+                .receive(on: DispatchQueue.main)
+                .sink(receiveValue: { [weak self] event in
+                    // Don't bother updating mouse position if it is currently hidden
+                    self?.update(event)
+                })
         })
         fastFreqRefresh = true
         
@@ -66,7 +67,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cursorVisible = mouseController.update(event)
         
         if cursorVisible {
-            mouseWindow.setFrameOrigin(mouseController.getFrameOrigin(event.locationInWindow))
+            let mousePosition = NSEvent.mouseLocation
+            mouseWindow.setFrameOrigin(mouseController.getFrameOrigin(mousePosition))
         }
         // Only use fast refresh rate if the cursor is actually visible
         if (fastFreqRefresh != cursorVisible) {
@@ -78,7 +80,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mouseWindow = NSWindow(contentViewController: mouseController)
         mouseWindow.styleMask = [.borderless]
         mouseWindow.ignoresMouseEvents = true
-        mouseWindow.setFrame(NSRect(x: 0, y: 0, width: 50, height: 50), display: false)
+        let initialSize = mouseController.currentCursorSize == .zero ? NSSize(width: 50, height: 50) : mouseController.currentCursorSize
+        mouseWindow.setFrame(NSRect(origin: .zero, size: initialSize), display: false)
+        mouseWindow.hasShadow = false
         mouseWindow.backgroundColor = .clear
         mouseWindow.level = .screenSaver
         mouseWindow.orderFront(nil)
@@ -146,6 +150,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         userDefaults.setActiveMonitors(enabledMonitors)
     }
 
+    private func fastRefreshStride() -> DispatchQueue.SchedulerTimeType.Stride {
+        let targetFPS = NSScreen.screens
+            .compactMap { $0.maximumFramesPerSecond }
+            .filter { $0 > 0 }
+            .max() ?? 60
+        return .seconds(1.0 / Double(targetFPS))
+    }
+
 }
 
 extension UserDefaults {
@@ -158,4 +170,3 @@ extension UserDefaults {
         set(enabledMonitors, forKey: "enabledMonitors")
     }
 }
-
